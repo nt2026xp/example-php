@@ -1,59 +1,80 @@
 <?php
 /**
- * 央視新聞直播源動態 M3U 生成器
+ * 央視新聞直播整合腳本 (M3U清單 + 單頻道跳轉 + 緩存)
  */
 
-// 設置 Header，讓播放器辨認為 M3U 播放列表
+// 1. 頻道配置 (名稱 => 直播間ID)
+$channel_map = [
+    "CCTV1" => "11200132825562653886",
+    "CCTV2" => "12030532124776958103",
+    "CCTV4" => "10620168294224708952",
+    "CCTV7" => "8516529981177953694",
+    "CCTV9" => "7252237247689203957",
+    "CCTV10" => "14589146016461298119",
+    "CCTV12" => "13180385922471124325",
+    "CCTV13" => "16265686808730585228",
+    "CCTV17" => "4496917190172866934",
+    "CCTV4K" => "2127841942201075403"
+];
+
+// 獲取當前腳本網址，用於生成 M3U 內的連結
+$self_url = "http://" . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF'];
+
+// --- 模式 A：單頻道跳轉 ( php?id=CCTV13 ) ---
+if (isset($_GET['id'])) {
+    $id = $_GET['id'];
+    if (!isset($channel_map[$id])) {
+        die("頻道不存在");
+    }
+    
+    $m3u8 = get_live_url($id, $channel_map[$id]);
+    if ($m3u8) {
+        header("Location: $m3u8");
+    } else {
+        header("HTTP/1.1 404 Not Found");
+        echo "抓取失敗";
+    }
+    exit;
+}
+
+// --- 模式 B：自動生成 M3U 清單 ( 直接訪問 php ) ---
 header('Content-Type: application/vnd.apple.mpegurl');
-header('Content-Disposition: inline; filename="cctv_live.m3u"');
+header('Content-Disposition: inline; filename="cctv_all.m3u"');
+
+echo "#EXTM3U x-tvg-url=\"http://51zmt.top\"\n";
+foreach ($channel_map as $name => $room_id) {
+    echo "#EXTINF:-1 tvg-name=\"$name\" group-title=\"央視新聞\",$name\n";
+    echo $self_url . "?id=" . $name . "\n";
+}
+
 
 /**
- * 從央視新聞頁面提取 m3u8 地址
+ * 核心抓取與緩存函數
  */
-function fetch_m3u8($id) {
-    $url = "https://cctv.com" . $id;
-    
+function get_live_url($name, $room_id) {
+    $cache_file = "cache_" . md5($name) . ".txt";
+    $cache_time = 3600; // 1小時
+
+    // 讀取緩存
+    if (file_exists($cache_file) && (time() - filemtime($cache_file) < $cache_time)) {
+        return file_get_contents($cache_file);
+    }
+
+    // 爬取官網
+    $url = "https://cctv.com" . $room_id;
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-    // 必須模擬手機端
     curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1');
-    
     $html = curl_exec($ch);
     curl_close($ch);
 
-    // 正則尋找 m3u8 連結
     if (preg_match('/"(https:[^"]+?\.m3u8[^"]*?)"/', $html, $matches)) {
-        return stripslashes($matches[1]);
+        $real_url = stripslashes($matches[1]);
+        file_put_contents($cache_file, $real_url);
+        return $real_url;
     }
-    return "";
-}
-
-// 頻道清單數據
-$channels = [
-    ["name" => "CCTV4K超高清", "id" => "2127841942201075403"],
-    ["name" => "CCTV1綜合", "id" => "11200132825562653886"],
-    ["name" => "CCTV2財經", "id" => "12030532124776958103"],
-    ["name" => "CCTV4中文國際", "id" => "10620168294224708952"],
-    ["name" => "CCTV7國防軍事", "id" => "8516529981177953694"],
-    ["name" => "CCTV9紀錄", "id" => "7252237247689203957"],
-    ["name" => "CCTV10科教", "id" => "14589146016461298119"],
-    ["name" => "CCTV12社會與法", "id" => "13180385922471124325"],
-    ["name" => "CCTV13新聞", "id" => "16265686808730585228"],
-    ["name" => "CCTV17農業農村", "id" => "4496917190172866934"]
-];
-
-// 開始輸出 M3U 內容
-echo "#EXTM3U x-tvg-url=\"http://51zmt.top\"\n";
-
-foreach ($channels as $item) {
-    $m3u8 = fetch_m3u8($item['id']);
-    
-    if ($m3u8) {
-        // tvg-name 用於匹配 EPG 節目表，group-title 用於頻道分類
-        echo "#EXTINF:-1 tvg-name=\"{$item['name']}\" group-title=\"央視新聞\",{$item['name']}\n";
-        echo $m3u8 . "\n";
-    }
+    return false;
 }
