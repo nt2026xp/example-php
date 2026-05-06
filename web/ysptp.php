@@ -1,5 +1,5 @@
 <?php
-// 停用廢棄警告輸出，避免干擾 Header 或 M3U8 格式
+// 停用廢棄警告，確保輸出純淨
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_WARNING);
 
 // --- 1. TS 代理 ---
@@ -9,9 +9,9 @@ if (isset($_GET['ts'])) {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     curl_setopt($ch, CURLOPT_USERAGENT, "cctv_app_tv");
     $tsData = curl_exec($ch);
-    // PHP 8+ 不再需要 curl_close
     header("Content-Type: video/MP2T");
     echo $tsData;
     exit;
@@ -34,21 +34,29 @@ $cctvList = [
     'cctv17' => 'Live1718276138318263', 'cctv4k' => 'Live1704872878572161'
 ];
 
-// --- 3. 核心請求函數 ---
+// --- 3. 核心請求函數 (強化診斷) ---
 function apiRequest($url, $payload, $uid) {
+    $postData = json_encode($payload);
     $headers = [
         'Content-Type: application/json',
+        'Content-Length: ' . strlen($postData),
         'UID: ' . $uid,
         'Referer: ' . REFERER,
         'User-Agent: ' . UA
     ];
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    
     $res = curl_exec($ch);
+    if ($res === false) {
+        return ['error' => 'CURL_ERROR: ' . curl_error($ch)];
+    }
     return json_decode($res, true);
 }
 
@@ -81,9 +89,12 @@ function getM3uContent($channelId, $uid) {
         'deviceId' => ['android_id' => $uid]
     ], $uid);
     
-    // 強化解析：嘗試從 videoList[0] 或直接從 videoList 獲取 url
-    $videoData = $base['data']['videoList'] ?? [];
-    $baseUrl = $videoData[0]['url'] ?? ($videoData['url'] ?? '');
+    // 改進解析路徑，處理多種可能的 API 結構
+    $baseUrl = '';
+    if (isset($base['data']['videoList'])) {
+        $vList = $base['data']['videoList'];
+        $baseUrl = is_array($vList) && isset($vList[0]['url']) ? $vList[0]['url'] : ($vList['url'] ?? '');
+    }
 
     if (!$baseUrl) return "Error: Failed to get Base URL. API Response: " . json_encode($base);
 
@@ -98,6 +109,7 @@ function getM3uContent($channelId, $uid) {
         'url' => $baseUrl
     ]));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         "UID: $uid", "APPID: 5f39826474a524f95d5f436eacfacfb67457c4a7",
         "APPSIGN: $appSign", "APPRANDOMSTR: $appRandomStr", "User-Agent: ".UA
@@ -105,18 +117,25 @@ function getM3uContent($channelId, $uid) {
     $res = json_decode(curl_exec($ch), true);
     $streamUrl = $res['url'] ?? '';
 
-    if (!$streamUrl) return "Error: Stream URL empty.";
+    if (!$streamUrl) return "Error: Stream URL empty. API Response: " . json_encode($res);
 
-    // Step 5: Content
-    $content = file_get_contents($streamUrl);
-    if (!$content) return "Error: Cannot fetch stream content.";
+    // Step 5: 抓取 M3U8 內容
+    $ch = curl_init($streamUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_USERAGENT, UA);
+    $content = curl_exec($ch);
+    
+    if (!$content) return "Error: Cannot fetch stream content from URL: " . $streamUrl;
     
     $path = substr($streamUrl, 0, strrpos($streamUrl, '/') + 1);
     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https" : "http";
     $self = $protocol . "://" . $_SERVER['HTTP_HOST'] . $_SERVER['SCRIPT_NAME'];
 
+    // 修正：$m[0] 是完整匹配字串
     return preg_replace_callback('/^[^#\s]+\.ts(\?.*)?$/m', function($m) use ($path, $self, $uid) {
-        $tsUrl = (stripos($m[0], 'http') === 0) ? $m[0] : $path . trim($m[0]);
+        $line = trim($m[0]);
+        $tsUrl = (stripos($line, 'http') === 0) ? $line : $path . $line;
         return $self . "?ts=" . urlencode($tsUrl) . "&uid=" . $uid;
     }, $content);
 }
