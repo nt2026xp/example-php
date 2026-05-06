@@ -1,5 +1,8 @@
 <?php
-// --- 1. TS 代理 (保持不變) ---
+// 停用廢棄警告輸出，避免干擾 Header 或 M3U8 格式
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_WARNING);
+
+// --- 1. TS 代理 ---
 if (isset($_GET['ts'])) {
     $ts_url = $_GET['ts'];
     $ch = curl_init($ts_url);
@@ -8,7 +11,7 @@ if (isset($_GET['ts'])) {
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_USERAGENT, "cctv_app_tv");
     $tsData = curl_exec($ch);
-    curl_close($ch);
+    // PHP 8+ 不再需要 curl_close
     header("Content-Type: video/MP2T");
     echo $tsData;
     exit;
@@ -31,7 +34,7 @@ $cctvList = [
     'cctv17' => 'Live1718276138318263', 'cctv4k' => 'Live1704872878572161'
 ];
 
-// --- 3. 核心請求函數 (統一使用 JSON POST) ---
+// --- 3. 核心請求函數 ---
 function apiRequest($url, $payload, $uid) {
     $headers = [
         'Content-Type: application/json',
@@ -46,18 +49,18 @@ function apiRequest($url, $payload, $uid) {
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     $res = curl_exec($ch);
-    curl_close($ch);
     return json_decode($res, true);
 }
 
 // --- 4. 取得 M3U8 內容 ---
 function getM3uContent($channelId, $uid) {
     global $cctvList;
-    if (!isset($cctvList[$channelId])) return "Channel Not Found";
+    if (!isset($cctvList[$channelId])) return "Error: Channel Not Found";
     $liveID = $cctvList[$channelId];
 
-    // Step 1: Register Device
     $pubKey = "-----BEGIN PUBLIC KEY-----\n" . chunk_split(PUB_KEY, 64, "\n") . "-----END PUBLIC KEY-----";
+    
+    // Step 1: Register
     openssl_public_encrypt($uid, $encUid, $pubKey);
     $reg = apiRequest('https://cctv.cn', [
         'device_name' => '央視頻電視投屏助手',
@@ -65,24 +68,26 @@ function getM3uContent($channelId, $uid) {
     ], $uid);
     $guid = $reg['data']['guid'] ?? '';
 
-    // Step 2: Get App Secret
+    // Step 2: Secret
     openssl_public_encrypt($guid, $encGuid, $pubKey);
     $sec = apiRequest('https://cctv.cn', ['guid' => base64_encode($encGuid)], $uid);
     $encSecret = $sec['data']['appSecret'] ?? '';
     openssl_public_decrypt(base64_decode($encSecret), $appSecret, $pubKey);
 
-    // Step 3: Get Base URL
+    // Step 3: Base URL
     $base = apiRequest('https://cctv.cn', [
         'id' => $liveID,
         'systemType' => 'android',
         'deviceId' => ['android_id' => $uid]
     ], $uid);
     
-    // 修正：檢查 videoList 是否存在
-    $baseUrl = $base['data']['videoList'][0]['url'] ?? '';
-    if (!$baseUrl) return "Error: Failed to get Base URL from CCTV API.";
+    // 強化解析：嘗試從 videoList[0] 或直接從 videoList 獲取 url
+    $videoData = $base['data']['videoList'] ?? [];
+    $baseUrl = $videoData[0]['url'] ?? ($videoData['url'] ?? '');
 
-    // Step 4: Get Stream URL
+    if (!$baseUrl) return "Error: Failed to get Base URL. API Response: " . json_encode($base);
+
+    // Step 4: Stream URL
     $appRandomStr = uniqid();
     $appSign = md5('5f39826474a524f95d5f436eacfacfb67457c4a7' . $appSecret . $appRandomStr);
     
@@ -100,23 +105,23 @@ function getM3uContent($channelId, $uid) {
     $res = json_decode(curl_exec($ch), true);
     $streamUrl = $res['url'] ?? '';
 
-    if (!$streamUrl) return "Error: Stream URL is empty.";
+    if (!$streamUrl) return "Error: Stream URL empty.";
 
-    // Step 5: 抓取真正的 M3U8 內容並轉換 TS 路徑
+    // Step 5: Content
     $content = file_get_contents($streamUrl);
-    $path = substr($streamUrl, 0, strrpos($streamUrl, '/') + 1);
+    if (!$content) return "Error: Cannot fetch stream content.";
     
+    $path = substr($streamUrl, 0, strrpos($streamUrl, '/') + 1);
     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https" : "http";
     $self = $protocol . "://" . $_SERVER['HTTP_HOST'] . $_SERVER['SCRIPT_NAME'];
 
-    // 取代 TS 檔案路徑為代理路徑
     return preg_replace_callback('/^[^#\s]+\.ts(\?.*)?$/m', function($m) use ($path, $self, $uid) {
-        $tsUrl = (stripos($m[0], 'http') === 0) ? $m[0] : $path . $m[0];
+        $tsUrl = (stripos($m[0], 'http') === 0) ? $m[0] : $path . trim($m[0]);
         return $self . "?ts=" . urlencode($tsUrl) . "&uid=" . $uid;
     }, $content);
 }
 
-// --- 5. 執行 ---
+// --- 5. 輸出 ---
 $id = $_GET['id'] ?? 'cctv4k';
 $uid = $_GET['uid'] ?? bin2hex(random_bytes(8));
 
@@ -124,7 +129,7 @@ $result = getM3uContent($id, $uid);
 
 if (strpos($result, 'Error') === 0) {
     header("Content-Type: text/plain; charset=utf-8");
-    echo "錯誤：\n" . $result;
+    echo $result;
 } else {
     header("Content-Type: application/x-mpegURL");
     echo $result;
