@@ -71,7 +71,9 @@ function send_get_request($url, $headers)
 
 function migu_encrypted_url(string $rawUrl): string
 {
-    $factorOfEncryption =;
+    // 補回被遺漏的 5 位加密因子陣列
+    $factorOfEncryption = [8, 3, 7, 6, 6];
+
 
     $parsed = parse_url($rawUrl);
     if ($parsed === false) {
