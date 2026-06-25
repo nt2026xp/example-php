@@ -71,9 +71,8 @@ function send_get_request($url, $headers)
 
 function migu_encrypted_url(string $rawUrl): string
 {
-    // 補回被遺漏的 5 位加密因子陣列
+    // 【已修復】填入原本遺漏的陣列參數
     $factorOfEncryption = [8, 3, 7, 6, 6];
-
 
     $parsed = parse_url($rawUrl);
     if ($parsed === false) {
@@ -170,19 +169,15 @@ function migu_encrypted_url(string $rawUrl): string
     return $rawUrl;
 }
 
-// === 補全與修正的核心請求函數 ===
 function handle_migu_main_request($id)
 {
-    // 1. 檢查快取
     [$cached, $hit] = get_migu_cache($id);
     if ($hit) return $cached;
 
-    // 2. 構造咪咕 API 請求參數
     [$tm, $saltSign] = get_sign_config($id);
     $salt = $saltSign[0];
     $sign = $saltSign[1];
 
-    // 咪咕愛看/視頻直播終端流通用 API 節點
     $apiUrl = "https://miguvideo.com" . $id . "&rateType=3"; 
 
     $headers = [
@@ -195,19 +190,14 @@ function handle_migu_main_request($id)
         "Host" => "://miguvideo.com"
     ];
 
-    // 3. 發送網路請求
     $resBody = send_get_request($apiUrl, $headers);
     if (!$resBody) return null;
 
     $json = json_decode($resBody, true);
-    // 依據咪咕常規響應結構解析原始 M3U8 網址 (body.url 或 body.playUrl)
     $playUrl = $json['body']['url'] ?? $json['body']['playUrl'] ?? null;
 
     if ($playUrl) {
-        // 4. 對網址進行 `ddCalcu` 等安全演算法二次加密
         $finalPlayUrl = migu_encrypted_url($playUrl);
-        
-        // 5. 寫入本地快取（設定快取 1800 秒 / 半小時，防止頻繁請求被封 IP）
         set_migu_cache($id, $finalPlayUrl, 1800);
         return $finalPlayUrl;
     }
@@ -224,7 +214,6 @@ if (empty($id)) {
 $playUrl = handle_migu_main_request($id);
 
 if ($playUrl) {
-    // 成功獲取，302 重定向跳轉到播放網址
     header("Location: " . $playUrl);
     exit;
 } else {
